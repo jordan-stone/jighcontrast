@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highcontrast"
+version = "0.1.0"
+description = "Tools for high-contrast imaging: ADI/SDI PCA, PSF photometry, and NaN-aware rotation."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Jordan Stone", email = "jstone.climb@gmail.com" }]
+keywords = ["astronomy", "high-contrast imaging", "ADI", "SDI", "PCA", "coronagraphy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+    "matplotlib>=3.3",
+    "astropy>=4.0",
+    "jfits>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jordan-stone/jighcontrast"
+Repository = "https://github.com/jordan-stone/jighcontrast"
+
+[tool.setuptools]
+packages = ["highcontrast"]
