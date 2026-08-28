@@ -1,6 +1,6 @@
 '''Self-contained 2-D Gaussian model and fitter.
 
-Drop-in replacements for the two functions ``highcontrast`` previously imported
+Drop-in replacements for the two functions ``jighcontrast`` previously imported
 from the external ``gaussfitter`` package (``twodgaussian`` and ``gaussfit``),
 implemented on top of numpy and ``scipy.optimize.leastsq`` so the package has no
 dependency outside the standard scientific stack.

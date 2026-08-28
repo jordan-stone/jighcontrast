@@ -1,4 +1,4 @@
-"""highcontrast: tools for high-contrast imaging (ADI/SDI PCA, PSF photometry, rotation)."""
+"""jighcontrast: tools for high-contrast imaging (ADI/SDI PCA, PSF photometry, rotation)."""
 
 from . import jPCA, jPhot, nan_rot
 

@@ -1,6 +1,41 @@
 import numpy as np
 from astropy.io import fits
 
+_EIGH_HINT_SHOWN = False
+
+def _maybe_suggest_eigh(n_images, n_pixels):
+    '''Print a one-time hint when a rectangular region makes ``method='eigh'``
+    worth trying.
+
+    The reliable speed-up from ``eigh`` is dimensional: it eigendecomposes the
+    smaller ``min(M, N) x min(M, N)`` covariance and never forms the larger
+    dimension's singular vectors, so it wins when one of M (images) and N
+    (optimization pixels) is well above the other. We fire at an aspect ratio of
+    at least 5:1 (with the larger dimension non-trivial), where the advantage is
+    dimensional and dependable. Near-square regions -- where any gain is only a
+    small, implementation-dependent constant we have no data for -- stay silent.
+    It is only a hint: ``eigh`` forms a covariance (Gram) matrix, which squares
+    its condition number and can cost a few digits of precision, so the message
+    says to keep ``svd`` when stability matters.'''
+    global _EIGH_HINT_SHOWN
+    if _EIGH_HINT_SHOWN:
+        return
+    lo, hi = min(n_images, n_pixels), max(n_images, n_pixels)
+    if lo >= 1 and hi >= 5 * lo and hi >= 100:
+        print("jPCA.PCA: strongly rectangular optimization region (%d images x "
+              "%d pixels, %.0f:1). method='eigh' decomposes the smaller %dx%d "
+              "covariance and skips the larger dimension, so it is usually "
+              "faster here; over the many PCA builds in an ADI/SDI reduction "
+              "(and repeated injection-recovery runs) that saving compounds. "
+              "Trade-off: eigh forms a covariance (Gram) matrix, squaring its "
+              "condition number and possibly costing a few digits of precision "
+              "-- keep the default 'svd' if you need maximum numerical stability "
+              "or push npca deep into the small-eigenvalue tail. (this hint "
+              "prints once per session)"
+              % (n_images, n_pixels, hi / lo, lo, lo))
+        _EIGH_HINT_SHOWN = True
+
+
 class PCA:
     '''Principal-component (KLIP-style) PSF subtraction.
 
@@ -51,6 +86,7 @@ class PCA:
             # Thin SVD: the left singular vectors and the null-space padding are
             # never used, so full_matrices=False is identical for every component
             # that __call__ touches and far cheaper for large regions.
+            _maybe_suggest_eigh(*library.shape)  # one-time speed hint for large PCA builds
             eigen_images, sqrt_eigvals, eigen_pixels_T = np.linalg.svd(library, full_matrices=False)
             self.eigenvalues = sqrt_eigvals**2
             self.eigenvectors = eigen_pixels_T.T  # already sorted and normalized

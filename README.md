@@ -1,13 +1,13 @@
-# highcontrast
+# jighcontrast
 
 Tools for high-contrast imaging: ADI/SDI PCA point-spread-function subtraction,
 PSF photometry / contrast estimation, and NaN-aware image rotation.
 
 ## Modules
 
-- `highcontrast.jPCA` — PCA (KLIP-style) PSF subtraction and ADI/SDI reference-library construction.
-- `highcontrast.jPhot` — PSF injection, aperture/PSF photometry, and radial noise / S-N estimation.
-- `highcontrast.nan_rot` — NaN-aware image rotation and rotation-center fitting.
+- `jighcontrast.jPCA` — PCA (KLIP-style) PSF subtraction and ADI/SDI reference-library construction.
+- `jighcontrast.jPhot` — PSF injection, aperture/PSF photometry, and radial noise / S-N estimation.
+- `jighcontrast.nan_rot` — NaN-aware image rotation and rotation-center fitting.
 
 ## Installation
 
@@ -18,7 +18,7 @@ Clone and install in editable mode:
 
 ```bash
 git clone https://github.com/jordan-stone/jighcontrast.git
-cd highcontrast
+cd jighcontrast
 pip install -e .
 ```
 
@@ -31,14 +31,18 @@ pip install git+https://github.com/jordan-stone/jighcontrast.git
 ## Usage
 
 ```python
-from highcontrast import jPCA, jPhot, nan_rot
+from jighcontrast import jPCA, jPhot, nan_rot
 
 # NaN-aware rotation about a given axis (x, y)
 rotated = nan_rot.nan_rot(image, angle=37.0, axis=(128, 128))
 
-# PCA PSF subtraction
-pca = jPCA.PCA(library_cube, opt_mask)
-residual = pca(target_image, npca=10)
+# PCA PSF subtraction.
+#   library_cube : (n_images, ydim, xdim) stack of reference PSF images
+#   opt_mask     : (ydim, xdim) boolean mask; True marks the pixels the PCA is
+#                  optimized over (the optimization region)
+pca = jPCA.PCA(library_cube, opt_mask)   # method='svd' (default) or 'eigh'
+residual = pca(target_image, npca=10)    # target_image (ydim, xdim); returns the
+                                         # residual pixels within opt_mask (1-D)
 ```
 
 ## Example
