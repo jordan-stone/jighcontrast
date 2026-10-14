@@ -20,6 +20,9 @@ def _maybe_suggest_eigh(n_images, n_pixels):
     global _EIGH_HINT_SHOWN
     if _EIGH_HINT_SHOWN:
         return
+    import multiprocessing
+    if multiprocessing.parent_process() is not None:
+        return          # a worker process (e.g. jFM n_jobs > 1): leave hints to the main one
     lo, hi = min(n_images, n_pixels), max(n_images, n_pixels)
     if lo >= 1 and hi >= 5 * lo and hi >= 100:
         print("jPCA.PCA: strongly rectangular optimization region (%d images x "
@@ -44,7 +47,7 @@ class PCA:
     first ``npca`` components and subtract that reconstruction to reveal faint
     off-axis sources.'''
 
-    def __init__(self, library_cube, opt_mask, method='svd'):
+    def __init__(self, library_cube, opt_mask, method='svd', centering='median'):
         '''Compute the principal components of a reference-image library.
 
         library_cube : ndarray (n_images, ydim, xdim)
@@ -53,9 +56,9 @@ class PCA:
             Pixels to include in the PCA (the optimization region).
         method : {'svd', 'eigh'}
             How to compute the principal components of the image library (the
-            median-subtracted reference images, arranged as an
-            n_images x n_pixels matrix). Both options give the same components
-            (up to a sign); they trade speed against numerical conditioning:
+            centered reference images, arranged as an n_images x n_pixels
+            matrix). Both options give the same components (up to a sign); they
+            trade speed against numerical conditioning:
 
             'svd'  -- thin singular-value decomposition of the image library
                       (``full_matrices=False``). Returns exactly the
@@ -67,16 +70,58 @@ class PCA:
                       covariance (n_pixels x n_pixels), mapped back into pixel
                       space. Fastest when one dimension greatly exceeds the other,
                       at the cost of a few digits of precision (it squares the
-                      matrix condition number).'''
+                      matrix condition number).
+        centering : {'median', 'frame'}
+            How the library is centered before the KL transform. Both remove a
+            reference level so the components describe fluctuations, but they
+            differ in what they remove -- and this choice interacts with KLIP-FM
+            (see ``jFM.forward_model_psf``):
+
+            'median' -- subtract the per-pixel *median over frames* (a shared
+                        spatial image). This is a pooled ensemble statistic, so
+                        an injected source leaks into it; the forward model
+                        neglects that leakage (valid for a median combine of an
+                        azimuthally transient source). It also does not remove a
+                        per-frame DC/background level, so with a variable
+                        background the rows keep non-zero, frame-varying means and
+                        the KL basis spends a mode on that variation.
+            'frame'  -- subtract each frame's *own mean over the zone* (a scalar
+                        per row), the convention of Pueyo (2016) PCA step 1
+                        (ms10.tex:579): T and every R_k are zero-mean over the
+                        subtraction zone. This is a per-image linear functional
+                        (not pooled across frames), so there is no source-leakage
+                        term to neglect and it removes a spatially-flat variable
+                        background exactly. It is the convention the Appendix E/F
+                        forward model is derived for.'''
         self.opt_mask = opt_mask
         self.method = method
+        self.centering = centering
         # Pull the optimization-region pixels out of every reference image and
-        # subtract the per-pixel median, giving the mean-removed image library
-        # (one row per image, one column per optimization-region pixel).
+        # center the library (one row per image, one column per optimization-
+        # region pixel). See the ``centering`` docstring for the two conventions.
         library = library_cube[:,opt_mask]
-        self.median_image = np.median(library, axis=0)
-        library = library - self.median_image[None,:]
+        if centering == 'frame':
+            # Pueyo step 1: zero-mean each frame over the zone (a scalar per row).
+            # There is no shared image to subtract from the target later, so the
+            # stored ``median_image`` is zero and __call__ removes the target's
+            # own zone-mean instead.
+            self.row_mean = library.mean(axis=1, keepdims=True)   # (n_images, 1)
+            library = library - self.row_mean
+            self.median_image = np.zeros(library.shape[1], dtype=float)
+        elif centering == 'median':
+            self.median_image = np.median(library, axis=0)
+            library = library - self.median_image[None,:]
+        else:
+            raise ValueError("centering must be 'median' or 'frame', got %r" % (centering,))
+        self.library = library  # centered reference frames S (n_images, n_pixels)
         self.A = library.T  # kept for backwards compatibility (images in columns)
+        # Frame-space quantities used by KLIP forward modeling (jFM). The SVD path
+        # populates these directly; the eigh path fills what it can (see below).
+        # In Pueyo (2016) notation: left_vectors are the frame-space eigenvectors
+        # V_k, eigenvalues are Lambda_k, eigenvectors are the pixel-space KL images
+        # Z_k, and library is the signal-free reference matrix S.
+        self.left_vectors = None      # V_k, shape (n_images, n_components)
+        self.singular_values = None   # sqrt(Lambda_k), shape (n_components,)
         #////////////////////////////////////////////////////////
         # Find the principal components, i.e. the eigen-images of the image
         # library's covariance. (G. Strang on using the SVD for this:
@@ -90,8 +135,23 @@ class PCA:
             eigen_images, sqrt_eigvals, eigen_pixels_T = np.linalg.svd(library, full_matrices=False)
             self.eigenvalues = sqrt_eigvals**2
             self.eigenvectors = eigen_pixels_T.T  # already sorted and normalized
+            # SVD of S = V Sigma Z^T gives the frame-space vectors V_k (left) and
+            # the singular values sqrt(Lambda_k) for free -- forward modeling needs
+            # them and this is the numerically robust way to get them (no squared
+            # covariance, so the Lambda_k - Lambda_j gaps in Eq. 50 stay well
+            # conditioned). This is why jFM prefers method='svd'.
+            self.left_vectors = eigen_images
+            self.singular_values = sqrt_eigvals
         elif method == 'eigh':
             self.eigenvalues, self.eigenvectors = _eigh_components(library)
+            # Recover the frame-space vectors from the bridge S^T V_k = sqrt(Lambda_k) Z_k
+            # -> V_k = S Z_k / sqrt(Lambda_k), so jFM can still forward-model from an
+            # eigh-built basis (with the precision caveat noted for 'eigh').
+            self.singular_values = np.sqrt(np.clip(self.eigenvalues, 0.0, None))
+            safe = self.singular_values > 0
+            self.left_vectors = np.zeros((library.shape[0], self.eigenvectors.shape[1]),
+                                         dtype=library.dtype)
+            self.left_vectors[:, safe] = (library @ self.eigenvectors[:, safe]) / self.singular_values[safe]
         else:
             raise ValueError("method must be 'svd' or 'eigh', got %r" % (method,))
 
@@ -104,7 +164,11 @@ class PCA:
             Number of principal components to project out.
 
         Returns the residual pixels within ``opt_mask`` (1-D ndarray).'''
-        image[self.opt_mask] -= self.median_image
+        if self.centering == 'frame':
+            # Match Pueyo step 1: zero-mean the target over the zone.
+            image[self.opt_mask] -= image[self.opt_mask].mean()
+        else:
+            image[self.opt_mask] -= self.median_image
         for k in range(npca):
             coefficient = np.dot(self.eigenvectors[:,k],image[self.opt_mask])
             image[self.opt_mask] -= (self.eigenvectors[:,k]) * coefficient
@@ -148,15 +212,66 @@ def _eigh_components(library):
     return eigenvalues, components
 
 
+def wrap_degrees(angle_deg):
+    '''Wrap an angle difference into [-180, 180) degrees, so that e.g. 179 and
+    -179 are 2 degrees apart (parallactic angles wrap through +/-180 for targets
+    transiting near the zenith).'''
+    return np.mod(np.asarray(angle_deg, dtype=float) + 180.0, 360.0) - 180.0
+
+
+def adi_sdi_displacement(rad_in_pix, q, wv, ref_q, ref_wv):
+    '''Apparent displacement (pixels) of a source between a reference frame and a
+    candidate frame, from the combined ADI + SDI geometry.
+
+    A source at separation ``rad_in_pix`` in the reference frame (parallactic
+    angle ``ref_q``, wavelength ``ref_wv``) moves in a candidate frame by two
+    effects:
+
+    * SDI radial term -- the speckle field (and the modeled source position)
+      scales radially with wavelength, so the source sits at ``rad_in_pix *
+      ref_wv / wv``; the *displacement* is the difference from ``rad_in_pix``,
+      i.e. ``rad_in_pix * (ref_wv / wv - 1)``.
+    * ADI azimuthal term -- field rotation moves the source along the arc by
+      ``rad_in_pix * (q - ref_q)`` (arc length, radians), with the angle
+      difference wrapped into [-180, 180) degrees (``wrap_degrees``).
+
+    The two are combined in quadrature. ``q``/``wv`` may be arrays.
+
+    Returns the displacement in pixels (same shape as ``q``/``wv``).'''
+    q = np.asarray(q, dtype=float)
+    wv = np.asarray(wv, dtype=float)
+    delta_r = rad_in_pix * (ref_wv / wv - 1.0)               # SDI radial motion
+    delta_phi = rad_in_pix * np.deg2rad(wrap_degrees(q - ref_q))   # ADI azimuthal motion
+    return np.hypot(delta_r, delta_phi)
+
+
+def resolution_element_pix(wavelength_um, D_m, pixscale_mas):
+    '''Size of one resolution element (lambda/D) in pixels.'''
+    lam_over_d_rad = (wavelength_um * 1e-6) / D_m
+    lam_over_d_mas = lam_over_d_rad * 206264806.0
+    return lam_over_d_mas / pixscale_mas
+
+
 def make_adi_sdi_library(cubes_list, paras_arr, waves_arr,
-                 rad_in_pix, ref_q, ref_wv, buffer_radius=2):
+                 rad_in_pix, ref_q, ref_wv, buffer_radius=2,
+                 exclusion_fwhm=None, D=None, pixscale=None):
     '''Select combined ADI+SDI reference frames for a target at a given radius.
 
-    For each frame, estimate how far a source at radius ``rad_in_pix`` would
-    move relative to the reference frame -- from the wavelength scaling
-    (SDI, ``ref_wv/wv``) and the parallactic-angle change (ADI, ``q-ref_q``) --
-    and keep only frames whose total displacement exceeds ``buffer_radius``
-    pixels, so a real companion is not self-subtracted.
+    For each frame, estimate how far a source at radius ``rad_in_pix`` would move
+    relative to the reference frame -- from the wavelength scaling (SDI) and the
+    parallactic-angle change (ADI), combined in quadrature by
+    ``adi_sdi_displacement`` -- and keep only frames whose displacement is large
+    enough that a real companion is not self-subtracted.
+
+    The acceptance threshold can be set two ways:
+
+    * ``exclusion_fwhm`` (preferred, physical) -- keep frames whose displacement
+      exceeds ``exclusion_fwhm`` resolution elements (lambda/D). Requires ``D``
+      (meters) and ``pixscale`` (mas/pixel); the resolution element is evaluated
+      per candidate frame at its own wavelength. This makes the exclusion zone a
+      fixed fraction of the PSF width for both the ADI and SDI motions.
+    * ``buffer_radius`` (pixels) -- used when ``exclusion_fwhm`` is None; keep
+      frames whose displacement exceeds this many pixels.
 
     cubes_list : sequence of ndarrays (n_frames, ydim, xdim)
         One spectral cube per exposure.
@@ -169,18 +284,30 @@ def make_adi_sdi_library(cubes_list, paras_arr, waves_arr,
     ref_q, ref_wv : float
         Parallactic angle and wavelength of the reference frame.
     buffer_radius : float
-        Minimum displacement (pixels) required to accept a reference frame.
+        Minimum displacement (pixels) to accept a frame (used only when
+        ``exclusion_fwhm`` is None).
+    exclusion_fwhm : float or None
+        Minimum displacement in resolution elements (lambda/D). If given, ``D``
+        and ``pixscale`` are required and ``buffer_radius`` is ignored.
+    D : float or None
+        Telescope diameter (meters), for ``exclusion_fwhm``.
+    pixscale : float or None
+        Plate scale (mas/pixel), for ``exclusion_fwhm``.
 
     Returns (frames, parallactic_angles, wavelengths) as ndarrays.'''
+    if exclusion_fwhm is not None and (D is None or pixscale is None):
+        raise ValueError("exclusion_fwhm requires both D and pixscale")
     good_frames = []
     good_qs = []
     good_waves = []
     for cube, q in zip(cubes_list, paras_arr):
         for frame, wv in zip(cube, waves_arr):
-            dr_pix = rad_in_pix * (ref_wv/wv)
-            dphi_pix = rad_in_pix*(ref_wv/wv) * np.deg2rad(q-ref_q)
-            dpix = np.sqrt(dr_pix**2 + dphi_pix**2)
-            if dpix > buffer_radius:
+            dpix = adi_sdi_displacement(rad_in_pix, q, wv, ref_q, ref_wv)
+            if exclusion_fwhm is not None:
+                threshold = exclusion_fwhm * resolution_element_pix(wv, D, pixscale)
+            else:
+                threshold = buffer_radius
+            if dpix > threshold:
                 good_frames.append(frame)
                 good_qs.append(q)
                 good_waves.append(wv)
@@ -198,7 +325,8 @@ def make_adi_library(im_list, paras_arr,
     im_list : sequence of ndarrays (ydim, xdim)
         Individual images.
     paras_arr : ndarray of float
-        Parallactic angle (degrees) for each image; wrapped into [0, 360).
+        Parallactic angle (degrees) for each image (not modified; the returned
+        angles are wrapped into [0, 360)).
     rad_in_pix : float
         Separation of the region of interest, in pixels.
     ref_q : float
@@ -207,12 +335,13 @@ def make_adi_library(im_list, paras_arr,
         Minimum arc displacement (pixels) required to accept a reference frame.
 
     Returns (frames, parallactic_angles) as ndarrays.'''
-    paras_arr+=360
-    paras_arr%=360
+    paras_arr = np.mod(np.asarray(paras_arr, dtype=float), 360.0)
     good_frames = []
     good_qs = []
     for im, q in zip(im_list, paras_arr):
-        dpix = rad_in_pix * np.mod(np.deg2rad(q-ref_q), 2*np.pi)
+        # arc displacement from the reference angle, using the wrapped difference so
+        # that a frame rotated by -1 deg is 1 deg away (not 359)
+        dpix = rad_in_pix * np.deg2rad(wrap_degrees(q - ref_q))
         if np.abs(dpix) > buffer_radius:
             good_frames.append(im)
             good_qs.append(q)

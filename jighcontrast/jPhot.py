@@ -1,7 +1,6 @@
 import numpy as np
-from scipy.interpolate import interp2d
 from scipy.ndimage import shift, map_coordinates, gaussian_filter
-from scipy.signal import convolve2d, fftconvolve
+from scipy.signal import fftconvolve
 from .gaussfit import gaussfit, twodgaussian
 from .nan_rot import nan_rot
 import matplotlib.pyplot as plt
@@ -124,7 +123,8 @@ def _gaussian_kernel(sigma):
 
 
 def get_noise(image, x, y, center_pix, wavelength, D, pixscale,
-              filter='tophat', psf_template=None, include=False, show=False):
+              filter='tophat', psf_template=None, include=False, show=False,
+              exclude_pos=None, exclude_radius=None):
     '''Measure the signal and noise at a source position in a reduced image.
 
     Puts the source at pixel ``(x, y)`` and lays down a ring of non-overlapping
@@ -157,6 +157,15 @@ def get_noise(image, x, y, center_pix, wavelength, D, pixscale,
         If True, include the source aperture among the noise samples.
     show : bool
         If True, overlay the aperture positions on the filtered image.
+    exclude_pos : (x, y) or None
+        If given, any ring aperture whose center falls within ``exclude_radius``
+        of this position is dropped from the noise samples (and ``n_apertures``
+        is decremented). Use it to keep a known companion out of the noise
+        estimate; the smaller aperture count then correctly increases the
+        Mawet+2014 small-sample penalty.
+    exclude_radius : float or None
+        Exclusion radius in pixels (defaults to one lambda/D if ``exclude_pos``
+        is given without a radius).
 
     Returns (signal, noise, n_apertures).'''
     center_x, center_y = center_pix
@@ -203,7 +212,17 @@ def get_noise(image, x, y, center_pix, wavelength, D, pixscale,
         plt.show()
 
     signal = float(samples[0])
-    noise_samples = samples if include else samples[1:]
+    if include:
+        noise_samples, noise_x, noise_y = samples, xs, ys
+    else:
+        noise_samples, noise_x, noise_y = samples[1:], xs[1:], ys[1:]
+
+    # Drop apertures on a known companion so it does not inflate the noise.
+    if exclude_pos is not None:
+        er = exclude_radius if exclude_radius is not None else res_pix
+        keep = np.hypot(noise_x - exclude_pos[0], noise_y - exclude_pos[1]) > er
+        noise_samples = noise_samples[keep]
+
     return signal, float(np.std(noise_samples)), int(noise_samples.size)
 
 
@@ -390,3 +409,78 @@ def make_SN_map(image, center_pix, wavelength, D=8.25, pixscale=34.5):
                 out_im[ypix, xpix] = phot/noise
 
     return out_im
+
+
+def measure_star_centers(cube, guess, half=4):
+    '''Star position in each spectral channel of unocculted exposure(s).
+
+    Fits a 2-D Gaussian (with a constant background) to the brightest pixel's
+    neighborhood in the median-over-exposures image of each channel.
+
+    Its main use is the PSF calibration: an unocculted snapshot of the star
+    (e.g. before and after a coronagraphic sequence) must be centered on its
+    own peak before it serves as the unit-contrast planet model (see
+    ``jFM.offaxis_psf_stamps``). Measure and register each snapshot
+    separately -- tip/tilt differs between them.
+
+    It does NOT locate the star behind a coronagraph during the sequence: a
+    snapshot only records where the star was at that moment. Without a
+    reference such as satellite spots, use the coronagraph's calibrated position
+    on the detector as the star position for the coronagraphic frames.
+
+    cube : ndarray (n_exp, n_wave, ny, nx) or (n_wave, ny, nx)
+        Unocculted exposure(s).
+    guess : (x, y)
+        Approximate star position; the search starts at the brightest pixel
+        within ``2 * half`` of it.
+    half : int
+        Half-size of the fitting box (pixels).
+
+    Returns an (n_wave, 2) array of (x, y) positions, pixel-center convention.'''
+    from scipy.optimize import least_squares
+    cube = np.asarray(cube, dtype=float)
+    if cube.ndim == 4:
+        cube = np.median(cube, axis=0)
+    gx, gy = int(round(guess[0])), int(round(guess[1]))
+    out = np.zeros((cube.shape[0], 2))
+    for w, im in enumerate(cube):
+        box = im[gy - 2 * half:gy + 2 * half + 1, gx - 2 * half:gx + 2 * half + 1]
+        by, bx = np.unravel_index(np.nanargmax(box), box.shape)
+        y0, x0 = gy - 2 * half + by, gx - 2 * half + bx
+        sub = im[y0 - half:y0 + half + 1, x0 - half:x0 + half + 1]
+        yy, xx = np.indices(sub.shape)
+        ok = np.isfinite(sub)
+
+        def resid(p):
+            model = p[0] * np.exp(-((xx - p[1]) ** 2 + (yy - p[2]) ** 2) / (2 * p[3] ** 2)) + p[4]
+            return (model - sub)[ok]
+
+        r = least_squares(resid, [np.nanmax(sub), half, half, 1.5, 0.0])
+        out[w] = (x0 - half + r.x[1], y0 - half + r.x[2])
+    return out
+
+
+def register_channels(cube, centers, new_center, order=3):
+    '''Shift each spectral channel so the star moves from ``centers[w]`` to a
+    common ``new_center`` (sub-pixel spline shift; NaN-free input assumed).
+
+    Use it to center unocculted PSF snapshots on their measured positions
+    (``measure_star_centers``), or to remove a STATIC, known chromatic offset
+    from coronagraphic data. A per-channel offset measured on snapshots does not
+    describe a coronagraphic sequence whose offset changes with time (e.g.
+    atmospheric dispersion varying with airmass, tip/tilt residuals).
+
+    cube : ndarray (n_exp, n_wave, ny, nx)
+    centers : (n_wave, 2) array of (x, y), e.g. from ``measure_star_centers``.
+    new_center : (x, y)
+
+    Returns the registered cube (float).'''
+    from scipy.ndimage import shift as ndshift
+    cube = np.asarray(cube, dtype=float)
+    out = np.empty_like(cube)
+    for w in range(cube.shape[1]):
+        dx = new_center[0] - centers[w][0]
+        dy = new_center[1] - centers[w][1]
+        for t in range(cube.shape[0]):
+            out[t, w] = ndshift(cube[t, w], (dy, dx), order=order, mode='nearest')
+    return out
