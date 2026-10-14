@@ -20,3 +20,19 @@ env/
 # Large data cubes (distributed as release assets, downloaded by the example)
 *.fits
 .ipynb_checkpoints/
+.virtual_documents/
+
+# Validation outputs: keep the summary figures, not the raw arrays/logs
+validation/results/*.npz
+validation/results/*.log
+validation/results/extraction_cases/
+.pytest_cache/
+validation/results/raw_cube/
+validation/results/superseded/
+validation/data/*.npz
+validation/results/v2_summary.txt
+
+# Local notebook builder/render scripts (the executed notebooks are what is published)
+examples/build_*.py
+examples/render_for_github.py
+examples/contrast_curve.csv

@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jighcontrast"
-version = "0.1.0"
-description = "Tools for high-contrast imaging: ADI/SDI PCA, PSF photometry, and NaN-aware rotation."
+version = "0.2.0"
+description = "High-contrast imaging tools: ADI/SDI KLIP, KLIP forward modeling (spectral extraction, contrast curves), photometry and NaN-aware rotation."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Jordan Stone", email = "jstone.climb@gmail.com" }]
-keywords = ["astronomy", "high-contrast imaging", "ADI", "SDI", "PCA", "coronagraphy"]
+keywords = ["astronomy", "high-contrast imaging", "ADI", "SDI", "PCA", "KLIP", "forward modeling", "coronagraphy", "IFS"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -24,6 +24,10 @@ dependencies = [
     "astropy>=4.0",
     "jfits>=1.0.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest"]
+parallel = ["threadpoolctl"]
 
 [project.urls]
 Homepage = "https://github.com/jordan-stone/jighcontrast"
