@@ -6,20 +6,28 @@ import jfits
 def nan_rot(im, angle, axis, order=3, pivot=False, out_size=None):
     '''Rotate an image clockwise about an axis, propagating NaNs.
 
-    If ``pivot`` is True the image pivots about ``axis``; otherwise ``axis`` is
-    placed at the center of the output image. NaNs are preserved rather than
-    smeared by the interpolation (see ``nan_map_coordinates_2d``).
+    If ``pivot`` is True the image pivots about ``axis``, which stays at the same
+    pixel coordinate (shifted only by the integer padding when ``out_size`` is
+    larger than the image). Otherwise ``axis`` is moved to the center of the
+    output image. NaNs are preserved rather than smeared by the interpolation
+    (see ``nan_map_coordinates_2d``).
+
+    Pixel convention: coordinates follow ``scipy.ndimage.map_coordinates``, where
+    integer values are pixel CENTERS. The center of an axis of length N is
+    therefore (N-1)/2 -- e.g. 53.5 for a 108-pixel frame, 22 for a 45-pixel one.
+    ``axis`` must be given in this convention.
 
     im : ndarray (ydim, xdim)
         Image to rotate (may contain NaNs).
     angle : float
         Rotation angle, degrees clockwise.
     axis : (x, y)
-        Pixel coordinate of the rotation center.
+        Pixel coordinate of the rotation center (pixel-center convention).
     order : int
         Spline interpolation order passed to ``map_coordinates`` (default 3).
     pivot : bool
-        If True, pivot about ``axis``; if False, center ``axis`` in the output.
+        If True, pivot about ``axis`` in place; if False, place ``axis`` at the
+        output center, ((ydim_out-1)/2, (xdim_out-1)/2).
     out_size : (ydim, xdim) or None
         Shape of the output image. If None, a square of side ``2*max(im.shape)``
         is used.
@@ -27,13 +35,14 @@ def nan_rot(im, angle, axis, order=3, pivot=False, out_size=None):
     Returns the rotated image as an ndarray.'''
     angle*=np.pi/180.#convert to radians
     if out_size is None:
-        y, x = np.indices((2*max(im.shape),2*max(im.shape)))
-        y-=(int(max(im.shape)/2))
-        x-=(int(max(im.shape)/2))
+        out_size = (2*max(im.shape), 2*max(im.shape))
+        pad_y = pad_x = int(max(im.shape)/2)
     else:
-        y, x = np.indices(out_size)
-        y-=int((out_size[0]-im.shape[0])/2)
-        x-=int((out_size[1]-im.shape[1])/2)
+        pad_y = int((out_size[0]-im.shape[0])/2)
+        pad_x = int((out_size[1]-im.shape[1])/2)
+    y, x = np.indices(out_size)
+    y-=pad_y
+    x-=pad_x
     
     #calculate how the axis moves when pivoting from bottom left corner
     theta_axis = np.arctan2(axis[1],axis[0])
@@ -41,9 +50,12 @@ def nan_rot(im, angle, axis, order=3, pivot=False, out_size=None):
     yoffset = r_axis*np.sin(theta_axis) - r_axis*np.sin(theta_axis-angle)
     xoffset = r_axis*np.cos(theta_axis) - r_axis*np.cos(theta_axis-angle)
 
-    #put the axis in the middle? 
-    ycenter_offset = (1-pivot) * ((im.shape[0]/2.)-axis[1])#pivot is a bool (i.e. 0 or 1)
-    xcenter_offset = (1-pivot) * ((im.shape[1]/2.)-axis[0])
+    #put the axis in the middle? Output pixel index j samples the shifted
+    #coordinate j - pad, so to land the axis on the output center (out-1)/2 --
+    #the center in map_coordinates' pixel-center convention, NOT out/2 -- the
+    #shift is ((out-1)/2 - pad) - axis.
+    ycenter_offset = (1-pivot) * (((out_size[0]-1)/2. - pad_y)-axis[1])#pivot is a bool (i.e. 0 or 1)
+    xcenter_offset = (1-pivot) * (((out_size[1]-1)/2. - pad_x)-axis[0])
     yoffset += ycenter_offset
     xoffset += xcenter_offset
 
